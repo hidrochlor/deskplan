@@ -296,3 +296,15 @@ test('a step names its assignment as its group, so the agenda can fold a day of 
   assert.equal(byId.a, null);
   assert.equal(byId.t, null);
 });
+
+test('the agenda filter sorts events into tasks, assignments (with their steps), exams; lectures and feed events are under All only', async () => {
+  const { typeOf } = await import('../renderer/modules/calendar/CalendarView.js');
+  const ev = (kind, group = null) => new CalendarEvent({ id: kind, title: kind, start: at(30, 9), kind, group });
+  assert.equal(typeOf(ev('Task')), 'task');
+  assert.equal(typeOf(ev('Reading')), 'task');
+  assert.equal(typeOf(ev('Assignment')), 'assignment');
+  assert.equal(typeOf(ev('Task', { id: 'a', title: 'Lab report' })), 'assignment');
+  assert.equal(typeOf(ev('Exam')), 'exam');
+  assert.equal(typeOf(ev('Lecture')), null);
+  assert.equal(typeOf(ev('Event')), null);
+});

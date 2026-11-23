@@ -12,8 +12,33 @@ const CELL = { gap: 4, pad: 10, num: 22, chip: 20 }; // pad = 4+4 padding + 1+1 
 const LIST_DAYS = 30;                      // how far the Agenda view looks ahead, and how much "Show more" adds
 const MODE_KEY = 'deskplan.calendarMode';  // Month or Agenda, remembered on this PC only
 
+const FILTER_KEY = 'deskplan.agendaFilter'; // the Agenda's type filter, remembered on this PC only
+
+// The Agenda's filter chips. A step (a task inside an assignment) counts as its assignment's. Lectures and other feed
+// events have no chip: they show under All only.
+const TYPES = [
+  { id: 'task', label: 'Tasks' },
+  { id: 'assignment', label: 'Assignments' },
+  { id: 'exam', label: 'Exams' },
+];
+
+/** Which filter chip an event belongs to, or null (a lecture or other feed event: All only). */
+export function typeOf(ev) {
+  if (ev.kind === 'Exam') return 'exam';
+  if (ev.kind === 'Assignment' || ev.group) return 'assignment';
+  if (ev.kind === 'Lecture' || ev.kind === 'Event') return null;
+  return 'task'; // tasks, and older actionable kinds such as Reading
+}
+
 function readMode() {
   try { return localStorage.getItem(MODE_KEY) === 'agenda' ? 'agenda' : 'month'; } catch { return 'month'; }
+}
+
+function readFilter() {
+  try {
+    const ids = JSON.parse(localStorage.getItem(FILTER_KEY) ?? '[]');
+    return new Set(Array.isArray(ids) ? ids.filter((id) => TYPES.some((t) => t.id === id)) : []);
+  } catch { return new Set(); }
 }
 
 // Month grid plus a strip of the whole year, so you can see at a glance which months have
@@ -30,6 +55,7 @@ export class CalendarView extends Component {
     this.addForm = null;
     this.mode = readMode();
     this.listDays = LIST_DAYS;
+    this.types = readFilter(); // the Agenda shows only these types; empty = everything
     this.openGroups = new Set(); // assignments whose steps are unfolded in the agenda (`${dayKey}|${groupId}`)
   }
 
@@ -44,6 +70,7 @@ export class CalendarView extends Component {
     this.agendaHeadEl = h('div', { class: 'agenda-head' });
     this.formHost = h('div', { class: 'agenda-form' }); // never cleared by redraws, so typing is safe
     this.listEl = h('div', { class: 'cal-list' });
+    this.filterEl = h('div', { class: 'cal-filter', role: 'group', 'aria-label': 'Show only' });
     this.modeBtns = {
       month: h('button', { class: 'seg-btn', type: 'button', onClick: () => this.setMode('month') }, 'Month'),
       agenda: h('button', { class: 'seg-btn', type: 'button', onClick: () => this.setMode('agenda') }, 'Agenda'),
@@ -62,6 +89,7 @@ export class CalendarView extends Component {
       this.weekdaysEl = h('div', { class: 'cal-weekdays' }),
       this.gridEl,
       h('div', { class: 'agenda' }, this.agendaHeadEl, this.formHost, this.agendaEl),
+      this.filterEl,
       this.listEl);
     return this.rootEl;
   }
@@ -267,13 +295,22 @@ export class CalendarView extends Component {
     this.agendaEl.append(...this.rowsFor(events, this.day, now, () => this.renderAgenda()));
   }
 
-  /** One day's rows. Two or more steps of one assignment fold into one row; a lone step shows as it is. */
+  /**
+   * One day's rows. When the assignment itself is on this day too, its steps fold under its own row (a chevron opens
+   * them). Otherwise two or more steps of one assignment fold into one row of their own, and a lone step shows as it is.
+   */
   rowsFor(events, day, now, redraw) {
     const groups = new Map();
     for (const ev of events) if (ev.group) groups.set(ev.group.id, [...(groups.get(ev.group.id) ?? []), ev]);
+    const parents = new Set(events.filter((ev) => ev.kind === 'Assignment' && groups.has(ev.ref?.id)).map((ev) => ev.ref.id));
     const drawn = new Set();
     const rows = [];
     for (const ev of events) {
+      if (parents.has(ev.ref?.id) && ev.kind === 'Assignment') {
+        rows.push(...this.agendaParent(ev, groups.get(ev.ref.id), day, now, redraw));
+        continue;
+      }
+      if (ev.group && parents.has(ev.group.id)) continue; // drawn under its assignment
       const steps = ev.group ? groups.get(ev.group.id) : null;
       if (!steps || steps.length < 2) { rows.push(this.agendaRow(ev, now)); continue; }
       if (drawn.has(ev.group.id)) continue;
@@ -294,9 +331,13 @@ export class CalendarView extends Component {
     const top = this.listEl.scrollTop;
     clear(this.listEl);
 
-    const overdue = this.ctx.deadlines.events().filter((ev) => !ev.done && !ev.quiet && ev.dueAt < today);
+    const allOverdue = this.ctx.deadlines.events().filter((ev) => !ev.done && !ev.quiet && ev.dueAt < today);
+    const ahead = this.ctx.deadlines.inRange(today, until);
+    this.renderFilter([...allOverdue, ...ahead]);
+    const shown = (ev) => !this.types.size || this.types.has(typeOf(ev));
+    const overdue = allOverdue.filter(shown);
     const byDay = new Map();
-    for (const ev of this.ctx.deadlines.inRange(today, until)) {
+    for (const ev of ahead.filter(shown)) {
       for (const day of ev.days()) {
         if (day < today || day >= until) continue;
         const key = dayKey(day);
@@ -318,13 +359,39 @@ export class CalendarView extends Component {
         offset === 0 ? 'today' : '', this.rowsFor(events, day, now, redraw)));
     }
     if (!overdue.length && !days.length) {
-      this.listEl.appendChild(h('div', { class: 'empty cal-list-empty' }, `Nothing in the next ${this.listDays} days.`));
+      const what = this.types.size ? TYPES.filter((t) => this.types.has(t.id)).map((t) => t.label.toLowerCase()).join(' or ') : null;
+      this.listEl.appendChild(h('div', { class: 'empty cal-list-empty' },
+        what ? `No ${what} in the next ${this.listDays} days.` : `Nothing in the next ${this.listDays} days.`));
     }
     this.listEl.appendChild(h('div', { class: 'cal-list-more' },
       h('span', { class: 'muted' }, `Up to ${formatDate(addDays(until, -1))}`),
       h('button', { class: 'btn btn-small', type: 'button', onClick: () => { this.listDays += LIST_DAYS; this.renderList(); } },
         `Show ${LIST_DAYS} more days`)));
     this.listEl.scrollTop = top; // a redraw (the minute tick, a change) keeps the reader's place
+  }
+
+  /** All, then one chip per type with how many of it the list holds. Several can be on at once. */
+  renderFilter(events) {
+    const counts = Object.fromEntries(TYPES.map((t) => [t.id, 0]));
+    for (const ev of events) if (typeOf(ev)) counts[typeOf(ev)] += 1;
+    const chip = (label, on, onClick, count = null) => h('button', {
+      class: `cal-filter-chip${on ? ' active' : ''}`, type: 'button', 'aria-pressed': on ? 'true' : 'false', onClick,
+    }, label, count === null ? null : h('span', { class: 'cal-filter-count' }, String(count)));
+
+    clear(this.filterEl);
+    this.filterEl.append(
+      chip('All', !this.types.size, () => this.setTypes(new Set())),
+      ...TYPES.map((t) => chip(t.label, this.types.has(t.id), () => {
+        const next = new Set(this.types);
+        if (next.has(t.id)) next.delete(t.id); else next.add(t.id);
+        this.setTypes(next.size === TYPES.length ? new Set() : next); // every type on is the same as All
+      }, counts[t.id])));
+  }
+
+  setTypes(types) {
+    this.types = types;
+    try { localStorage.setItem(FILTER_KEY, JSON.stringify([...types])); } catch { /* remembered until the app closes */ }
+    this.renderList();
   }
 
   listDay(title, count, tone, rows) {
@@ -343,6 +410,32 @@ export class CalendarView extends Component {
     h('span', { class: 'dot', style: { '--c': ev.color } }),
     h('span', { class: 'agenda-title' }, ev.title),
     h('span', { class: 'muted agenda-where' }, nested ? ev.kind : ev.context ? `${ev.kind} · ${ev.context}` : ev.kind));
+  }
+
+  /**
+   * An assignment's own row with its steps of this day folded under it. The chevron opens and closes them; the rest of
+   * the row opens the assignment, as any row does.
+   */
+  agendaParent(ev, steps, day, now, redraw) {
+    const key = `${dayKey(day)}|${ev.ref.id}`;
+    const open = this.openGroups.has(key);
+    const done = steps.filter((s) => s.done).length;
+    const late = !ev.done && ev.isOver(+now);
+    const toggle = (e) => { e.stopPropagation(); if (open) this.openGroups.delete(key); else this.openGroups.add(key); redraw(); };
+    const head = h('div', {
+      class: `agenda-row agenda-parent${ev.done ? ' done' : ''}${late ? ' late' : ''}`, 'data-keep-panel': true,
+      onClick: () => this.open(ev),
+    },
+    h('span', { class: 'agenda-time' }, ev.timeLabel()),
+    h('button', {
+      class: 'agenda-chev agenda-chev-btn', type: 'button', 'aria-expanded': open ? 'true' : 'false',
+      title: open ? 'Hide the steps' : 'Show the steps', onClick: toggle,
+    }, icon(open ? 'chevDown' : 'chevRight', 14)),
+    h('span', { class: 'dot', style: { '--c': ev.color } }),
+    h('span', { class: 'agenda-title' }, ev.title),
+    h('span', { class: 'muted agenda-where' },
+      `${ev.kind} · ${steps.length} ${steps.length === 1 ? 'step' : 'steps'} · ${done} done`));
+    return open ? [head, ...steps.map((s) => this.agendaRow(s, now, true))] : [head];
   }
 
   /** One row for an assignment's steps on this day ("3 steps · 1 done"), and the steps under it when unfolded. */
