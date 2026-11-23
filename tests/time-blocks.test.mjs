@@ -280,3 +280,19 @@ test('a reminder for a block is dropped when it is more than 6 hours past the en
   service.tick(at(6, 19, 0).getTime() + 7 * HOUR);            // the phone slept: both steps are due, but long past the end
   assert.equal(notes.length, 0);
 });
+
+// ── Steps in the agenda ─────────────────────────────────────────────────────
+
+test('a step names its assignment as its group, so the agenda can fold a day of steps; other items have none', async () => {
+  const { deadlines } = await setup([
+    row('a', 'assignment', { title: 'Lab report', deadline: iso(at(30, 23, 59)) }),
+    row('s1', 'task', { parentId: 'a', deadline: iso(at(30, 10)) }),
+    row('s2', 'task', { parentId: 'a', deadline: iso(at(30, 14)) }),
+    row('t', 'task', { deadline: iso(at(30, 12)) }),
+  ]);
+  const byId = Object.fromEntries(deadlines.onDay(at(30, 0)).map((e) => [e.ref.id, e.group]));
+  assert.deepEqual(byId.s1, { id: 'a', title: 'Lab report' });
+  assert.deepEqual(byId.s2, { id: 'a', title: 'Lab report' });
+  assert.equal(byId.a, null);
+  assert.equal(byId.t, null);
+});

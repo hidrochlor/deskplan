@@ -4,6 +4,7 @@ import { seriesOf } from './Repeats.js';
 
 // Feeds every item that has a deadline (at any folder depth) to the calendar and the top bar.
 // An item with a start as well is a time block: the event runs from start to deadline.
+// A step (a task inside an assignment) names its assignment as its group, so the agenda can fold a day's steps.
 // A repeating task also shows the copies still to come (half a year ahead): not made yet, so a click selects its
 // latest copy, whose panel shows the whole series.
 export class ItemDeadlineSource extends CalendarSource {
@@ -27,8 +28,15 @@ export class ItemDeadlineSource extends CalendarSource {
         color: item.kindInfo.color,
         done: item.isDone,
         ref: { type: 'item', id: item.id },
+        group: this.groupOf(item, items, tree),
       }))
       .concat(this.coming(items.all(), tree));
+  }
+
+  groupOf(item, items, tree) {
+    if (!tree.rules.isStep(item)) return null;
+    const assignment = items.get(item.parentId);
+    return { id: assignment.id, title: assignment.title || 'Untitled' };
   }
 
   coming(all, tree) {

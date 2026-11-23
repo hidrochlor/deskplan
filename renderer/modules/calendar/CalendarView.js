@@ -9,10 +9,17 @@ import { DayAddForm } from './DayAddForm.js';
 
 // Sizes used to work out how many deadline chips fit in a day cell (keep in step with styles.css).
 const CELL = { gap: 4, pad: 10, num: 22, chip: 20 }; // pad = 4+4 padding + 1+1 border; num/chip include the 2px gap
+const LIST_DAYS = 30;                      // how far the Agenda view looks ahead, and how much "Show more" adds
+const MODE_KEY = 'deskplan.calendarMode';  // Month or Agenda, remembered on this PC only
+
+function readMode() {
+  try { return localStorage.getItem(MODE_KEY) === 'agenda' ? 'agenda' : 'month'; } catch { return 'month'; }
+}
 
 // Month grid plus a strip of the whole year, so you can see at a glance which months have
 // deadlines and jump to any of them. Shows whatever the registered calendar sources provide.
 // If a module registered a 'creator', you can add things straight onto a day.
+// The Agenda view swaps all that for a list: what is overdue, then every day with something on it, from today.
 export class CalendarView extends Component {
   constructor(ctx) {
     super(ctx);
@@ -21,6 +28,9 @@ export class CalendarView extends Component {
     this.day = startOfDay(now);
     this.addingOn = null;   // the day the add form is open for
     this.addForm = null;
+    this.mode = readMode();
+    this.listDays = LIST_DAYS;
+    this.openGroups = new Set(); // assignments whose steps are unfolded in the agenda (`${dayKey}|${groupId}`)
   }
 
   /** The first registered creator, or null (then there is no Add button). */
@@ -33,18 +43,35 @@ export class CalendarView extends Component {
     this.agendaEl = h('div', { class: 'agenda-list' });
     this.agendaHeadEl = h('div', { class: 'agenda-head' });
     this.formHost = h('div', { class: 'agenda-form' }); // never cleared by redraws, so typing is safe
+    this.listEl = h('div', { class: 'cal-list' });
+    this.modeBtns = {
+      month: h('button', { class: 'seg-btn', type: 'button', onClick: () => this.setMode('month') }, 'Month'),
+      agenda: h('button', { class: 'seg-btn', type: 'button', onClick: () => this.setMode('agenda') }, 'Agenda'),
+    };
 
-    return h('section', { class: 'view calendar' },
+    this.rootEl = h('section', { class: 'view calendar' },
       h('header', { class: 'view-head cal-head' },
         h('div', { class: 'cal-nav' },
-          h('button', { class: 'icon-btn', title: 'Previous month', onClick: () => this.go(-1) }, icon('chevLeft', 16)),
+          h('button', { class: 'icon-btn cal-month-only', title: 'Previous month', onClick: () => this.go(-1) }, icon('chevLeft', 16)),
           this.titleEl,
-          h('button', { class: 'icon-btn', title: 'Next month', onClick: () => this.go(1) }, icon('chevRight', 16))),
-        h('button', { class: 'btn btn-small', onClick: () => this.today() }, 'Today')),
+          h('button', { class: 'icon-btn cal-month-only', title: 'Next month', onClick: () => this.go(1) }, icon('chevRight', 16))),
+        h('div', { class: 'cal-head-tools' },
+          h('div', { class: 'seg', role: 'group', 'aria-label': 'Calendar view' }, this.modeBtns.month, this.modeBtns.agenda),
+          h('button', { class: 'btn btn-small', onClick: () => this.today() }, 'Today'))),
       this.stripEl,
       this.weekdaysEl = h('div', { class: 'cal-weekdays' }),
       this.gridEl,
-      h('div', { class: 'agenda' }, this.agendaHeadEl, this.formHost, this.agendaEl));
+      h('div', { class: 'agenda' }, this.agendaHeadEl, this.formHost, this.agendaEl),
+      this.listEl);
+    return this.rootEl;
+  }
+
+  setMode(mode) {
+    if (mode === this.mode) return;
+    this.mode = mode;
+    try { localStorage.setItem(MODE_KEY, mode); } catch { /* then it is remembered until the app closes */ }
+    if (mode === 'agenda') this.closeAdd();
+    this.render();
   }
 
   onMount() {
@@ -55,7 +82,7 @@ export class CalendarView extends Component {
     let lastHeight = 0;
     const observer = new ResizeObserver(() => {
       const height = this.gridEl.clientHeight;
-      if (Math.abs(height - lastHeight) < 2) return;
+      if (this.mode !== 'month' || Math.abs(height - lastHeight) < 2) return;
       lastHeight = height;
       this.renderGrid();
     });
@@ -78,6 +105,7 @@ export class CalendarView extends Component {
   }
 
   today() {
+    if (this.mode === 'agenda') { this.listEl.scrollTop = 0; return; }
     const now = new Date();
     this.month = startOfMonth(now);
     this.selectDay(startOfDay(now));
@@ -118,6 +146,17 @@ export class CalendarView extends Component {
   // ── Drawing ────────────────────────────────────────────────────────────────
 
   render() {
+    const agenda = this.mode === 'agenda';
+    this.rootEl.classList.toggle('is-agenda', agenda);
+    for (const [mode, btn] of Object.entries(this.modeBtns)) {
+      btn.classList.toggle('active', mode === this.mode);
+      btn.setAttribute('aria-pressed', mode === this.mode ? 'true' : 'false');
+    }
+    if (agenda) {
+      this.titleEl.textContent = 'Agenda';
+      this.renderList();
+      return;
+    }
     this.titleEl.textContent = `${MONTHS_LONG[this.month.getMonth()]} ${this.month.getFullYear()}`;
     this.weekdaysEl.replaceChildren(...weekdayLabels().map((d) => h('div', {}, d)));
     this.renderStrip();
@@ -225,16 +264,105 @@ export class CalendarView extends Component {
     }
 
     clear(this.agendaEl);
+    this.agendaEl.append(...this.rowsFor(events, this.day, now, () => this.renderAgenda()));
+  }
+
+  /** One day's rows. Two or more steps of one assignment fold into one row; a lone step shows as it is. */
+  rowsFor(events, day, now, redraw) {
+    const groups = new Map();
+    for (const ev of events) if (ev.group) groups.set(ev.group.id, [...(groups.get(ev.group.id) ?? []), ev]);
+    const drawn = new Set();
+    const rows = [];
     for (const ev of events) {
-      const late = !ev.done && ev.isOver(+now);
-      this.agendaEl.appendChild(h('div', {
-        class: `agenda-row${ev.done ? ' done' : ''}${late ? ' late' : ''}`, 'data-keep-panel': true,
-        onClick: () => this.open(ev),
-      },
-      h('span', { class: 'agenda-time' }, ev.timeLabel()),
-      h('span', { class: 'dot', style: { '--c': ev.color } }),
-      h('span', { class: 'agenda-title' }, ev.title),
-      h('span', { class: 'muted agenda-where' }, ev.context ? `${ev.kind} · ${ev.context}` : ev.kind)));
+      const steps = ev.group ? groups.get(ev.group.id) : null;
+      if (!steps || steps.length < 2) { rows.push(this.agendaRow(ev, now)); continue; }
+      if (drawn.has(ev.group.id)) continue;
+      drawn.add(ev.group.id);
+      rows.push(...this.agendaGroup(ev.group, steps, day, now, redraw));
     }
+    return rows;
+  }
+
+  /**
+   * The Agenda view: what is still open although its time has passed, then every day from today that has something
+   * on it (a block that crosses midnight is listed on each day it touches). "Show more" looks further ahead.
+   */
+  renderList() {
+    const now = new Date();
+    const today = startOfDay(now);
+    const until = addDays(today, this.listDays);
+    const top = this.listEl.scrollTop;
+    clear(this.listEl);
+
+    const overdue = this.ctx.deadlines.events().filter((ev) => !ev.done && !ev.quiet && ev.dueAt < today);
+    const byDay = new Map();
+    for (const ev of this.ctx.deadlines.inRange(today, until)) {
+      for (const day of ev.days()) {
+        if (day < today || day >= until) continue;
+        const key = dayKey(day);
+        if (!byDay.has(key)) byDay.set(key, { day, events: [] });
+        byDay.get(key).events.push(ev);
+      }
+    }
+    const days = [...byDay.values()].sort((a, b) => a.day - b.day);
+
+    const redraw = () => this.renderList();
+    if (overdue.length) {
+      this.listEl.appendChild(this.listDay('Overdue', `${overdue.length} still open`, 'late',
+        this.rowsFor(overdue, new Date(0), now, redraw)));
+    }
+    for (const { day, events } of days) {
+      const offset = Math.round((day - today) / 86400000);
+      const name = offset === 0 ? 'Today' : offset === 1 ? 'Tomorrow' : WEEKDAYS_LONG[(day.getDay() + 6) % 7];
+      this.listEl.appendChild(this.listDay(`${name}, ${formatDate(day)}`, `${events.length} ${events.length === 1 ? 'thing' : 'things'}`,
+        offset === 0 ? 'today' : '', this.rowsFor(events, day, now, redraw)));
+    }
+    if (!overdue.length && !days.length) {
+      this.listEl.appendChild(h('div', { class: 'empty cal-list-empty' }, `Nothing in the next ${this.listDays} days.`));
+    }
+    this.listEl.appendChild(h('div', { class: 'cal-list-more' },
+      h('span', { class: 'muted' }, `Up to ${formatDate(addDays(until, -1))}`),
+      h('button', { class: 'btn btn-small', type: 'button', onClick: () => { this.listDays += LIST_DAYS; this.renderList(); } },
+        `Show ${LIST_DAYS} more days`)));
+    this.listEl.scrollTop = top; // a redraw (the minute tick, a change) keeps the reader's place
+  }
+
+  listDay(title, count, tone, rows) {
+    return h('div', { class: `cal-list-day${tone ? ` ${tone}` : ''}` },
+      h('div', { class: 'cal-list-head' }, h('span', { class: 'agenda-day' }, title), h('span', { class: 'muted' }, ` · ${count}`)),
+      rows);
+  }
+
+  agendaRow(ev, now, nested = false) {
+    const late = !ev.done && ev.isOver(+now);
+    return h('div', {
+      class: `agenda-row${ev.done ? ' done' : ''}${late ? ' late' : ''}${nested ? ' agenda-step' : ''}`, 'data-keep-panel': true,
+      onClick: () => this.open(ev),
+    },
+    h('span', { class: 'agenda-time' }, ev.timeLabel()),
+    h('span', { class: 'dot', style: { '--c': ev.color } }),
+    h('span', { class: 'agenda-title' }, ev.title),
+    h('span', { class: 'muted agenda-where' }, nested ? ev.kind : ev.context ? `${ev.kind} · ${ev.context}` : ev.kind));
+  }
+
+  /** One row for an assignment's steps on this day ("3 steps · 1 done"), and the steps under it when unfolded. */
+  agendaGroup(group, steps, day, now, redraw) {
+    const key = `${dayKey(day)}|${group.id}`;
+    const open = this.openGroups.has(key);
+    const done = steps.filter((s) => s.done).length;
+    const late = steps.some((s) => !s.done && s.isOver(+now));
+    const toggle = () => { if (open) this.openGroups.delete(key); else this.openGroups.add(key); redraw(); };
+    const head = h('div', {
+      class: `agenda-row agenda-group${done === steps.length ? ' done' : ''}${late ? ' late' : ''}`, 'data-keep-panel': true,
+      role: 'button', tabindex: 0, 'aria-expanded': open ? 'true' : 'false',
+      title: open ? 'Hide the steps' : 'Show the steps',
+      onClick: toggle,
+      onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } },
+    },
+    h('span', { class: 'agenda-time' }, steps[0].timeLabel()),
+    h('span', { class: 'agenda-chev' }, icon(open ? 'chevDown' : 'chevRight', 14)),
+    h('span', { class: 'agenda-title' }, group.title),
+    h('span', { class: 'muted agenda-where' }, `${steps.length} steps · ${done} done`));
+    return open ? [head, ...steps.map((s) => this.agendaRow(s, now, true))] : [head];
   }
 }

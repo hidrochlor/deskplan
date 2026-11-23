@@ -16,8 +16,10 @@ export class CalendarEvent {
    * @param {{type:string,id:string}} [o.ref]  what to select when clicked
    * @param {boolean} [o.quiet]  only drawn on the calendar: no reminders and never "next" in the top bar (e.g. a lecture)
    * @param {'auto'|'exam'} [o.remind]  'exam': warn 1 day and 1 hour before it starts, instead of the usual steps
+   * @param {{id:string,title:string}} [o.group]  what it belongs to (a step's assignment): the agenda folds a day's
+   *   events of one group into a single row
    */
-  constructor({ id, title, context = '', start, end = null, kind = '', color = '#7c8cff', done = false, ref = null, quiet = false, remind = 'auto' }) {
+  constructor({ id, title, context = '', start, end = null, kind = '', color = '#7c8cff', done = false, ref = null, quiet = false, remind = 'auto', group = null }) {
     this.id = id;
     this.title = title;
     this.context = context;
@@ -29,6 +31,7 @@ export class CalendarEvent {
     this.ref = ref;
     this.quiet = quiet;
     this.remind = remind;
+    this.group = group;
   }
 
   /** Runs from start to end (rather than being due at one moment). */

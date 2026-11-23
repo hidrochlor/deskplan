@@ -34,13 +34,15 @@ export class FeedEventEditor extends Component {
     const { session, kind, color, course } = found;
     this.bus.emit('panel:title', { text: kind, color });
 
-    this.el.append(
+    // filter: the DOM's own append() would print a missing timetable as the text "null".
+    this.el.append(...[
       h('div', { class: 'field' },
         h('div', { class: 'feed-ev-title' }, session.title),
         h('div', { class: 'feed-ev-line' }, icon('clock', 14), this.when(session)),
         session.context ? h('div', { class: 'feed-ev-line' }, icon('info', 14), session.context) : null,
         h('div', { class: 'set-hint' }, 'From your calendar feeds. Read-only.')),
-      course && course.sessions.length ? this.timetable(course, session) : null);
+      course && course.sessions.length ? this.timetable(course, session) : null,
+    ].filter(Boolean));
   }
 
   /** "Nov 3, 09:00–12:15", or one time for a moment. */
